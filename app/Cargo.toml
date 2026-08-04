@@ -1,7 +1,12 @@
 [package]
-name = "remotelink"
+name = "googlejim"
 version = "0.1.0"
+description = "A Tauri App"
 edition = "2021"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -17,6 +22,18 @@ machine-uid = "0.3"
 sysinfo = "0.30"
 anyhow = "1.0"
 hex = "0.4"
+tauri = { version = "1.5", features = ["api-all", "custom-protocol", "system-tray"] }
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.20", features = ["native-tls"] }
+futures-util = "0.3"
+serde_json = "1.0"
+enigo = "0.2.1"
+xcap = "0.9.8"
+image = "0.25"
+base64 = "0.21"
+
+[build-dependencies]
+tauri-build = { version = "1.5", features = [] }
 
 [profile.release]
 lto = true

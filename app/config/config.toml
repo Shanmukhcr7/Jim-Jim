@@ -1,0 +1,6 @@
+device_id = "RL-104C-14E2-1757"
+device_name = "Shanmukh"
+os_version = "11 (26200)"
+machine_fingerprint = "84a46787-7154-41e8-951f-726b34b51175"
+password_hash = "$argon2id$v=19$m=19456,t=2,p=1$TAsUVII7OvhKugnWPfLZCg$oE0drmQiazeszncsbQCxW3Avt/8Wf+wUcMYkk0j5MC4"
+signaling_server_url = "ws://h10ifdl5y9wzocojecyc0h31.148.230.67.167.sslip.io/ws"

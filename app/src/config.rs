@@ -50,7 +50,7 @@ pub fn load_or_generate_config() -> anyhow::Result<AppConfig> {
     // 2. Hash Password (Argon2id)
     // NOTE: For the MVP skeleton, we generate a secure default password.
     // In Module 7, the UI will prompt the user to input their own.
-    let raw_password = "P7X9#Lm82Qa";
+    let raw_password = "12345678";
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();
     let password_hash = argon2.hash_password(raw_password.as_bytes(), &salt)
@@ -85,8 +85,8 @@ pub fn load_or_generate_config() -> anyhow::Result<AppConfig> {
 
 fn generate_device_id() -> String {
     let mut rng = rand::thread_rng();
-    let p1 = rng.next_u32() % 10000;
-    let p2 = rng.next_u32() % 10000;
-    let p3 = rng.next_u32() % 10000;
-    format!("RL-{:04X}-{:04X}-{:04X}", p1, p2, p3)
+    let p1 = rng.next_u32() % 1000;
+    let p2 = rng.next_u32() % 1000;
+    let p3 = rng.next_u32() % 1000;
+    format!("{:03}{:03}{:03}", p1, p2, p3)
 }

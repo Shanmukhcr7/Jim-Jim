@@ -1,0 +1,5 @@
+/app/target/
+/app/ui/node_modules/
+/app/ui/dist/
+*.exe
+*.log

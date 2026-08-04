@@ -1,6 +1,0 @@
-[workspace]
-members = [
-    "agent/*",
-    "services/signaling"
-]
-resolver = "2"
