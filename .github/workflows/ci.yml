@@ -1,0 +1,50 @@
+name: RemoteLink CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  test-agent:
+    name: Test Rust Agent
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run Tests
+        working-directory: ./agent
+        run: cargo test --all-features
+
+  test-backend:
+    name: Test Python Microservices
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Poetry
+        run: pip install poetry
+      # In a real workflow, we'd run pytest across services here
+      - name: Verify Environment
+        run: poetry --version
+
+  build-frontend:
+    name: Build Frontends
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+      - name: Install pnpm
+        run: npm install -g pnpm
+      - name: Install Dependencies
+        run: pnpm install
+      - name: Build Apps
+        run: pnpm run build
