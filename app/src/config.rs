@@ -63,7 +63,7 @@ pub fn load_or_generate_config() -> anyhow::Result<AppConfig> {
         os_version,
         machine_fingerprint,
         password_hash,
-        signaling_server_url: "ws://localhost:8000/ws".to_string(),
+        signaling_server_url: "ws://h10ifdl5y9wzocojecyc0h31.148.230.67.167.sslip.io/ws".to_string(),
     };
 
     // 3. Generate ECDH Keypair (x25519)
