@@ -4,13 +4,6 @@ import { invoke } from '@tauri-apps/api/tauri';
 import { listen } from '@tauri-apps/api/event';
 import './index.css';
 
-const ICE_SERVERS = {
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' }
-  ]
-};
-
 const appLog = (msg) => {
     console.log(msg);
     invoke('log_message', { msg: String(msg) }).catch(()=>{});
@@ -27,14 +20,41 @@ function App() {
   
   const [sessionActive, setSessionActive] = useState(false);
   const [isHost, setIsHost] = useState(false);
-  const [remoteCursor, setRemoteCursor] = useState(null);
+  const [monitorIndex, setMonitorIndex] = useState(0); // 0 = primary monitor
   
+  // Debug Info State
+  const [debugInfo, setDebugInfo] = useState({
+      framesReceived: 0,
+      lastFrameSize: 0,
+      errorCount: 0,
+      lastError: ''
+  });
+  const debugInfoRef = useRef(debugInfo);
+  useEffect(() => { debugInfoRef.current = debugInfo; }, [debugInfo]);
+  const updateDebug = (updater) => {
+      setDebugInfo(prev => ({...prev, ...updater}));
+  };
+
   const imageRef = useRef(null);
-  const peerConnectionRef = useRef(null);
-  const dataChannelRef = useRef(null);
+  const containerRef = useRef(null);
+  const cursorRef = useRef(null);
+
   const activeTargetRef = useRef(null);
-  const iceCandidateQueueRef = useRef([]);
-  const frameBufferRef = useRef({});
+  const isHostRef = useRef(false);
+
+  // Audio Playback State
+  const audioCtxRef = useRef(null);
+  const nextPlayTimeRef = useRef(0);
+
+  const initAudio = () => {
+      if (!audioCtxRef.current) {
+          audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+          nextPlayTimeRef.current = 0;
+      }
+      if (audioCtxRef.current.state === 'suspended') {
+          audioCtxRef.current.resume();
+      }
+  };
 
   useEffect(() => {
     async function loadData() {
@@ -53,7 +73,7 @@ function App() {
   useEffect(() => {
     if (!deviceInfo) return;
     
-    let unlistenReq, unlistenWebrtc, unlistenVideo, unlistenCursor;
+    let unlistenReq, unlistenWebrtc;
     let isSubscribed = true;
     
     async function setupListeners() {
@@ -61,7 +81,6 @@ function App() {
         const req = event.payload;
         appLog("Incoming request received from " + req.source_id);
         
-        // Auto-Accept Logic (UltraViewer Style)
         if (req.password === "12345678") {
             appLog("Password valid! Auto-accepting...");
             acceptConnection(req.source_id);
@@ -71,163 +90,112 @@ function App() {
       });
       if (isSubscribed) unlistenReq = uReq; else uReq();
       
-      const uVideo = await listen('video_frame', (event) => {
-        const dc = dataChannelRef.current;
-        if (dc && dc.readyState === "open") {
-            if (dc.bufferedAmount < 500000) { // Allow ~3-4 frames to buffer (prevents stuttering) while keeping latency low
-                try {
-                    const b64 = event.payload;
-                    const CHUNK_SIZE = 16000;
-                    const totalChunks = Math.ceil(b64.length / CHUNK_SIZE);
-                    const frameId = Date.now() % 100000;
-                    
-                    for (let i = 0; i < totalChunks; i++) {
-                        const chunk = b64.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
-                        dc.send(`V|${frameId}|${i}|${totalChunks}|${chunk}`);
-                    }
-                } catch(e) {}
-            }
-        }
-      });
-      if (isSubscribed) unlistenVideo = uVideo; else uVideo();
-
-      const uCursor = await listen('mouse_position', (event) => {
-          const dc = dataChannelRef.current;
-          if (dc && dc.readyState === "open") {
-              const pos = event.payload;
-              try {
-                  dc.send(JSON.stringify({ action: "CURSOR_POS", nx: pos.nx, ny: pos.ny }));
-              } catch(e) {}
-          }
-      });
-      if (isSubscribed) unlistenCursor = uCursor; else uCursor();
-      
       const uWebrtc = await listen('webrtc_signaling', async (event) => {
         const msg = event.payload;
-        appLog(`WEBRTC MSG Received: ${msg.type}`);
         
-        if (msg.type === "OFFER") {
-            try {
-                appLog("Processing OFFER...");
-                activeTargetRef.current = msg.source_id;
-                setIsHost(false);
-                
-                const pc = new RTCPeerConnection(ICE_SERVERS);
-                peerConnectionRef.current = pc;
-                iceCandidateQueueRef.current = [];
-                
-                pc.ondatachannel = (e) => {
-                    appLog("Data channel received");
-                    dataChannelRef.current = e.channel;
-                    e.channel.onmessage = (msgEvent) => {
-                        const text = msgEvent.data;
-                        if (typeof text === 'string' && text.startsWith('V|')) {
-                            // MJPEG Video Chunk
-                            const parts = text.split('|');
-                            if (parts.length >= 5) {
-                                const fId = parts[1];
-                                const idx = parseInt(parts[2], 10);
-                                const total = parseInt(parts[3], 10);
-                                const data = parts.slice(4).join('|');
-                                
-                                const buffer = frameBufferRef.current;
-                                if (!buffer[fId]) {
-                                    buffer[fId] = { received: 0, total: total, chunks: new Array(total), time: Date.now() };
-                                }
-                                
-                                if (!buffer[fId].chunks[idx]) {
-                                    buffer[fId].chunks[idx] = data;
-                                    buffer[fId].received++;
-                                    
-                                    if (buffer[fId].received === total) {
-                                        if (imageRef.current) {
-                                            imageRef.current.src = `data:image/jpeg;base64,${buffer[fId].chunks.join('')}`;
-                                        }
-                                        delete buffer[fId];
-                                    }
-                                }
-                                
-                                // Cleanup dropped frames
-                                const now = Date.now();
-                                for (const id in buffer) {
-                                    if (now - buffer[id].time > 500) {
-                                        delete buffer[id];
-                                    }
-                                }
-                            }
-                        } else if (typeof text === 'string') {
-                            try {
-                                const parsed = JSON.parse(text);
-                                if (parsed.action === "CURSOR_POS") {
-                                    setRemoteCursor({ nx: parsed.nx, ny: parsed.ny });
-                                }
-                            } catch(e) {}
-                        }
-                    };
-                };
-                
-                pc.onicecandidate = (e) => {
-                    if (e.candidate) {
-                        invoke('send_signaling_message', {
-                            payload: JSON.stringify({
-                                type: "ICE", target_id: msg.source_id, source_id: deviceInfo?.device_id, candidate: e.candidate
-                            })
-                        }).catch(err => appLog("Send ICE error: " + err));
-                    }
-                };
-                
-                await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
-                appLog("Remote description set!");
-                
-                for (const c of iceCandidateQueueRef.current) {
-                    try {
-                        await pc.addIceCandidate(new RTCIceCandidate(c));
-                    } catch(e) { appLog("Buffered ICE err: " + e); }
+        if (msg.type === "FRAME" && !isHostRef.current) {
+            updateDebug({
+                framesReceived: debugInfoRef.current.framesReceived + 1,
+                lastFrameSize: msg.frame.length
+            });
+            if (imageRef.current) {
+                imageRef.current.src = `data:image/jpeg;base64,${msg.frame}`;
+            }
+            return;
+        }
+        
+        if (msg.type === "CURSOR_SYNC" && !isHostRef.current) {
+            if (cursorRef.current && imageRef.current) {
+                cursorRef.current.style.display = 'block';
+                const rect = imageRef.current.getBoundingClientRect();
+                const img = imageRef.current;
+                const intrinsicW = img.naturalWidth || 1920;
+                const intrinsicH = img.naturalHeight || 1080;
+                const containerRatio = rect.width / rect.height;
+                const intrinsicRatio = intrinsicW / intrinsicH;
+                let displayW, displayH, offsetX, offsetY;
+                if (containerRatio > intrinsicRatio) {
+                    displayH = rect.height;
+                    displayW = displayH * intrinsicRatio;
+                    offsetX = (rect.width - displayW) / 2;
+                    offsetY = 0;
+                } else {
+                    displayW = rect.width;
+                    displayH = displayW / intrinsicRatio;
+                    offsetX = 0;
+                    offsetY = (rect.height - displayH) / 2;
                 }
-                iceCandidateQueueRef.current = [];
+                const parentRect = cursorRef.current.parentElement.getBoundingClientRect();
+                const imageX = rect.left - parentRect.left;
+                const imageY = rect.top - parentRect.top;
                 
-                const answer = await pc.createAnswer();
-                await pc.setLocalDescription(answer);
-                appLog("Local description set (Answer). Sending ANSWER...");
-                
-                await invoke('send_signaling_message', {
-                    payload: JSON.stringify({
-                        type: "ANSWER", target_id: msg.source_id, source_id: deviceInfo?.device_id, sdp: answer
-                    })
-                });
-                appLog("ANSWER sent successfully!");
-                
+                const relativeX = imageX + offsetX + (msg.nx * displayW);
+                const relativeY = imageY + offsetY + (msg.ny * displayH);
+                cursorRef.current.style.left = `${relativeX}px`;
+                cursorRef.current.style.top = `${relativeY}px`;
+            }
+            return;
+        }
+        
+        if (msg.type === "INPUT" && isHostRef.current) {
+            const input = msg.input;
+            invoke('simulate_input', {
+                action: input.action, 
+                nx: input.nx !== undefined ? input.nx : null, 
+                ny: input.ny !== undefined ? input.ny : null, 
+                button: input.button !== undefined ? input.button : null, 
+                key: input.key !== undefined ? input.key : null
+            }).catch(()=>{});
+            return;
+        }
+
+        if (msg.type === "AUDIO" && !isHostRef.current) {
+            if (audioCtxRef.current) {
+                try {
+                    const binaryString = window.atob(msg.data);
+                    const bytes = new Uint8Array(binaryString.length);
+                    for (let i = 0; i < binaryString.length; i++) {
+                        bytes[i] = binaryString.charCodeAt(i);
+                    }
+                    const floatArray = new Float32Array(bytes.buffer);
+                    
+                    const buffer = audioCtxRef.current.createBuffer(msg.channels, floatArray.length / msg.channels, msg.sample_rate);
+                    for (let channel = 0; channel < msg.channels; channel++) {
+                        const channelData = buffer.getChannelData(channel);
+                        for (let i = 0; i < floatArray.length / msg.channels; i++) {
+                            channelData[i] = floatArray[i * msg.channels + channel];
+                        }
+                    }
+                    
+                    const source = audioCtxRef.current.createBufferSource();
+                    source.buffer = buffer;
+                    source.connect(audioCtxRef.current.destination);
+                    
+                    if (nextPlayTimeRef.current < audioCtxRef.current.currentTime) {
+                        nextPlayTimeRef.current = audioCtxRef.current.currentTime + 0.05; // 50ms buffer
+                    }
+                    
+                    source.start(nextPlayTimeRef.current);
+                    nextPlayTimeRef.current += buffer.duration;
+                } catch (e) {
+                    console.error("Audio playback error", e);
+                }
+            }
+            return;
+        }
+
+        if (msg.type === "ACCEPT") {
+            try {
+                appLog("Connection ACCEPTED by host! Starting Client mode.");
+                activeTargetRef.current = msg.source_id;
+                isHostRef.current = false;
+                setIsHost(false);
                 setSessionActive(true);
                 setConnectionStatus("");
             } catch (err) {
-                appLog(`Error processing OFFER: ${err}`);
+                appLog(`Error processing ACCEPT: ${err}`);
             }
         } 
-        else if (msg.type === "ANSWER") {
-            appLog("Processing ANSWER...");
-            try {
-                if (peerConnectionRef.current) {
-                    await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(msg.sdp));
-                    appLog("Remote description set for ANSWER!");
-                }
-            } catch (err) {
-                appLog(`Error processing ANSWER: ${err}`);
-            }
-        } 
-        else if (msg.type === "ICE") {
-            try {
-                if (peerConnectionRef.current) {
-                    if (peerConnectionRef.current.remoteDescription) {
-                        await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(msg.candidate));
-                    } else {
-                        appLog("Buffering ICE candidate (remoteDescription not set yet)");
-                        iceCandidateQueueRef.current.push(msg.candidate);
-                    }
-                }
-            } catch (err) {
-                appLog(`Error adding ICE: ${err}`);
-            }
-        }
       });
       if (isSubscribed) unlistenWebrtc = uWebrtc; else uWebrtc();
     }
@@ -238,8 +206,6 @@ function App() {
       isSubscribed = false;
       if (unlistenReq) unlistenReq();
       if (unlistenWebrtc) unlistenWebrtc();
-      if (unlistenVideo) unlistenVideo();
-      if (unlistenCursor) unlistenCursor();
     };
   }, [deviceInfo]);
 
@@ -247,9 +213,10 @@ function App() {
     e.preventDefault();
     if (!targetId || !password) return;
     
+    initAudio(); // Required to unlock Web Audio API on user gesture
+
     setConnecting(true);
     setConnectionStatus("Sending request...");
-    // Strip spaces for internal signaling
     const cleanTargetId = targetId.replace(/\s+/g, '');
     activeTargetRef.current = cleanTargetId;
     
@@ -271,58 +238,20 @@ function App() {
 
   const acceptConnection = async (source_id) => {
     activeTargetRef.current = source_id;
+    isHostRef.current = true;
     setIsHost(true);
     setConnectionStatus(`Session active with ${source_id}...`);
     
     try {
-        const pc = new RTCPeerConnection(ICE_SERVERS);
-        peerConnectionRef.current = pc;
-        iceCandidateQueueRef.current = [];
-        
-        const dc = pc.createDataChannel("input", {
-            ordered: false,
-            maxRetransmits: 0
-        });
-        
-        dc.onmessage = (e) => {
-            const text = e.data;
-            if (typeof text === 'string' && !text.startsWith('V|')) {
-                try {
-                    const input = JSON.parse(text);
-                    invoke('simulate_input', {
-                        action: input.action, 
-                        nx: input.nx !== undefined ? input.nx : null, 
-                        ny: input.ny !== undefined ? input.ny : null, 
-                        button: input.button !== undefined ? input.button : null, 
-                        key: input.key !== undefined ? input.key : null
-                    }).catch(()=>{});
-                } catch(e) {}
-            }
-        };
-        dataChannelRef.current = dc;
-        
-        pc.onicecandidate = (e) => {
-            if (e.candidate) {
-                invoke('send_signaling_message', {
-                    payload: JSON.stringify({
-                        type: "ICE", target_id: source_id, source_id: deviceInfo.device_id, candidate: e.candidate
-                    })
-                }).catch(err => appLog("Send ICE error: " + err));
-            }
-        };
-        
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        appLog("Local description set (Offer). Sending OFFER...");
-        
         await invoke('send_signaling_message', {
             payload: JSON.stringify({
-                type: "OFFER", target_id: source_id, source_id: deviceInfo.device_id, sdp: offer
+                type: "ACCEPT", target_id: source_id, source_id: deviceInfo.device_id
             })
         });
         
-        appLog("OFFER sent! Starting background capture engine.");
-        await invoke('start_capture');
+        appLog("ACCEPT sent! Starting background capture engine.");
+        await invoke('start_capture', { targetId: source_id, monitorIndex: monitorIndex });
+        await invoke('start_audio_capture', { targetId: source_id }).catch(e => appLog("Audio failed: " + e));
         
         setSessionActive(true);
     } catch (e) {
@@ -334,6 +263,7 @@ function App() {
   const disconnect = async () => {
       if (isHost) {
           await invoke('stop_capture').catch(()=>{});
+          await invoke('stop_audio_capture').catch(()=>{});
       }
       window.location.reload();
   };
@@ -358,21 +288,16 @@ function App() {
   }, [sessionActive, isHost]);
 
   const sendInput = (action, e) => {
-      if (isHost || !dataChannelRef.current || dataChannelRef.current.readyState !== "open") return;
+      if (isHost || !activeTargetRef.current) return;
       const payload = { action };
       if (e && e.type.startsWith("mouse") && imageRef.current) {
           const rect = imageRef.current.getBoundingClientRect();
           const img = imageRef.current;
-          
-          const intrinsicW = img.naturalWidth;
-          const intrinsicH = img.naturalHeight;
-          if (!intrinsicW || !intrinsicH) return;
-          
+          const intrinsicW = img.naturalWidth || 1920;
+          const intrinsicH = img.naturalHeight || 1080;
           const containerRatio = rect.width / rect.height;
           const intrinsicRatio = intrinsicW / intrinsicH;
-          
           let displayW, displayH, offsetX, offsetY;
-          
           if (containerRatio > intrinsicRatio) {
               displayH = rect.height;
               displayW = displayH * intrinsicRatio;
@@ -384,16 +309,12 @@ function App() {
               offsetX = 0;
               offsetY = (rect.height - displayH) / 2;
           }
-          
           const relativeX = e.clientX - rect.left - offsetX;
           const relativeY = e.clientY - rect.top - offsetY;
-          
-          // Clamp values to prevent clicking completely outside the remote screen area
           let nx = relativeX / displayW;
           let ny = relativeY / displayH;
           nx = Math.max(0, Math.min(1, nx));
           ny = Math.max(0, Math.min(1, ny));
-          
           payload.nx = nx;
           payload.ny = ny;
           if (e.type === "mousedown" || e.type === "mouseup") {
@@ -402,11 +323,12 @@ function App() {
       } else if (e && e.type.startsWith("key")) {
           payload.key = e.key;
       } else if (e && e.type === "wheel") {
-          // Normalize wheel delta to a smaller integer for smooth scrolling
           payload.nx = e.deltaX !== 0 ? (e.deltaX > 0 ? 1 : -1) : 0;
-          payload.ny = e.deltaY !== 0 ? (e.deltaY > 0 ? -1 : 1) : 0; // Negative because Enigo scroll(1) goes UP, but deltaY>0 means scroll down
+          payload.ny = e.deltaY !== 0 ? (e.deltaY > 0 ? -1 : 1) : 0; 
       }
-      dataChannelRef.current.send(JSON.stringify(payload));
+      invoke('send_signaling_message', {
+          payload: JSON.stringify({ type: "INPUT", target_id: activeTargetRef.current, input: payload })
+      }).catch(()=>{});
   };
   
   if (sessionActive) {
@@ -416,73 +338,60 @@ function App() {
                   <div>{isHost ? "Hosting Session - UltraViewer Mode Active" : "Remote Control Active"}</div>
                   <button onClick={disconnect} style={{padding: '5px 15px', cursor: 'pointer', background: '#ef4444', color: '#fff', border: 'none', borderRadius: '5px'}}>Disconnect</button>
               </div>
+              
+              <div style={{
+                  position: 'absolute', top: 50, left: 10, background: 'rgba(0,0,0,0.8)', 
+                  color: '#0f0', padding: '10px', borderRadius: '5px', zIndex: 9999,
+                  fontFamily: 'monospace', fontSize: '12px', pointerEvents: 'none'
+              }}>
+                  <strong>DEBUG OVERLAY</strong><br/>
+                  Role: {isHost ? "HOST" : "CLIENT"}<br/>
+                  Frames Rendered: {debugInfo.framesReceived}<br/>
+                  Last Frame Size: {debugInfo.lastFrameSize} bytes<br/>
+                  Errors: {debugInfo.errorCount}<br/>
+                  Last Error: {debugInfo.lastError || "None"}
+              </div>
+
               <div style={{flex: 1, position: 'relative', overflow: 'hidden'}}>
                   {!isHost && (
-                      <div style={{width: '100%', height: '100%', position: 'relative'}}>
-                          <img 
-                              ref={imageRef}
-                              style={{width: '100%', height: '100%', objectFit: 'contain', background: '#0f172a', display: 'block'}}
-                              draggable={false}
-                              onMouseMove={(e) => sendInput("MOUSE_MOVE", e)}
-                              onMouseDown={(e) => sendInput("MOUSE_DOWN", e)}
-                              onMouseUp={(e) => sendInput("MOUSE_UP", e)}
-                              onWheel={(e) => sendInput("MOUSE_SCROLL", e)}
-                              onContextMenu={(e) => e.preventDefault()}
-                          />
-                          {remoteCursor && (
-                              <div style={{
-                                  position: 'absolute',
-                                  top: 0, left: 0, width: '100%', height: '100%',
-                                  pointerEvents: 'none'
-                              }}>
-                                  <div style={{
-                                      position: 'absolute',
-                                      left: `${(() => {
-                                          if (!imageRef.current || !imageRef.current.naturalWidth) return 0;
-                                          const rect = imageRef.current.getBoundingClientRect();
-                                          const intrinsicRatio = imageRef.current.naturalWidth / imageRef.current.naturalHeight;
-                                          const containerRatio = rect.width / rect.height;
-                                          let displayW, offsetX;
-                                          if (containerRatio > intrinsicRatio) {
-                                              displayW = rect.height * intrinsicRatio;
-                                              offsetX = (rect.width - displayW) / 2;
-                                          } else {
-                                              displayW = rect.width;
-                                              offsetX = 0;
-                                          }
-                                          return offsetX + (remoteCursor.nx * displayW);
-                                      })()}px`,
-                                      top: `${(() => {
-                                          if (!imageRef.current || !imageRef.current.naturalWidth) return 0;
-                                          const rect = imageRef.current.getBoundingClientRect();
-                                          const intrinsicRatio = imageRef.current.naturalWidth / imageRef.current.naturalHeight;
-                                          const containerRatio = rect.width / rect.height;
-                                          let displayH, offsetY;
-                                          if (containerRatio > intrinsicRatio) {
-                                              displayH = rect.height;
-                                              offsetY = 0;
-                                          } else {
-                                              displayH = rect.width / intrinsicRatio;
-                                              offsetY = (rect.height - displayH) / 2;
-                                          }
-                                          return offsetY + (remoteCursor.ny * displayH);
-                                      })()}px`,
-                                      width: '10px', height: '10px',
-                                      backgroundColor: 'red',
-                                      borderRadius: '50%',
-                                      transform: 'translate(-50%, -50%)',
-                                      boxShadow: '0 0 4px white',
-                                      zIndex: 1000,
-                                      transition: 'left 0.05s linear, top 0.05s linear'
-                                  }} />
-                              </div>
-                          )}
-                      </div>
+                    <div style={{ position: 'relative', width: '100%', height: '100%' }}>
+                        <div 
+                            ref={containerRef}
+                            style={{ width: '100%', height: '100%', display: 'flex', justifyContent: 'center', alignItems: 'center' }}
+                        >
+                            <img 
+                                ref={imageRef}
+                                style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
+                                onMouseMove={(e) => sendInput("MOUSE_MOVE", e)}
+                                onMouseDown={(e) => sendInput("MOUSE_DOWN", e)}
+                                onMouseUp={(e) => sendInput("MOUSE_UP", e)}
+                                onWheel={(e) => sendInput("MOUSE_SCROLL", e)}
+                                draggable="false"
+                                onContextMenu={(e) => e.preventDefault()}
+                            />
+                        </div>
+                        <div 
+                            ref={cursorRef}
+                            style={{
+                                position: 'absolute',
+                                width: '12px',
+                                height: '12px',
+                                backgroundColor: 'rgba(255, 0, 0, 0.7)',
+                                border: '2px solid white',
+                                borderRadius: '50%',
+                                pointerEvents: 'none',
+                                display: 'none',
+                                zIndex: 9999,
+                                transform: 'translate(-50%, -50%)',
+                                boxShadow: '0 0 4px rgba(0,0,0,0.5)'
+                            }}
+                        />
+                    </div>
                   )}
                   {isHost && (
-                      <div style={{display: 'flex', height: '100%', alignItems: 'center', justifyContent: 'center', color: '#64748b', fontSize: '1.5rem', textAlign: 'center'}}>
+                      <div style={{display: 'flex', flexDirection: 'column', height: '100%', alignItems: 'center', justifyContent: 'center', color: '#64748b', fontSize: '1.5rem', textAlign: 'center'}}>
                           Your screen is being actively streamed to the remote client natively.<br/>
-                          (No Chromium popups or sharing icons!)
+                          (No WebRTC, Pure WebSocket Relay)
                       </div>
                   )}
               </div>
@@ -516,6 +425,21 @@ function App() {
               <div style={{ textAlign: 'center', color: '#10b981', fontSize: '1.5rem', marginBottom: '1rem', letterSpacing: '4px', fontWeight: 'bold' }}>
                 12345678
               </div>
+            </div>
+
+            <div className="info-group" style={{ marginTop: '1rem', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+              <div className="info-label" style={{ marginBottom: '0.5rem' }}>Select Monitor to Stream</div>
+              <select
+                value={monitorIndex}
+                onChange={(e) => setMonitorIndex(parseInt(e.target.value, 10))}
+                className="glass-input"
+                style={{ width: '100%', maxWidth: '250px', padding: '0.8rem', fontSize: '1rem', background: 'rgba(30, 41, 59, 0.7)', color: 'white', border: '1px solid rgba(148, 163, 184, 0.2)' }}
+              >
+                <option value={0}>Monitor 1 (Primary)</option>
+                <option value={1}>Monitor 2</option>
+                <option value={2}>Monitor 3</option>
+                <option value={3}>Monitor 4</option>
+              </select>
             </div>
           </div>
 

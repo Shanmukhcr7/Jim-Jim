@@ -8,6 +8,7 @@ mod network;
 mod webrtc;
 mod capture;
 mod input;
+mod audio;
 
 use tracing::{info, error};
 use tracing_appender::rolling;
@@ -28,11 +29,13 @@ fn log_message(msg: String) {
 }
 
 #[tauri::command]
-async fn send_signaling_message(
+fn send_signaling_message(
     sender: tauri::State<'_, network::SignalingSender>,
     payload: String,
 ) -> Result<(), String> {
-    sender.0.send(payload).await.map_err(|e| e.to_string())
+    // try_send provides critical backpressure by dropping messages if the channel is full,
+    // preventing a complete deadlock when the network cannot keep up with the frame rate.
+    sender.0.try_send(payload).map_err(|e| e.to_string())
 }
 
 // Input Simulation State
@@ -165,7 +168,7 @@ fn main() -> anyhow::Result<()> {
 
     info!("Starting GoogleJim MVP Desktop App...");
 
-    let (tx, rx) = mpsc::channel(100);
+    let (tx, rx) = mpsc::channel(10);
 
     let quit = CustomMenuItem::new("quit".to_string(), "Quit");
     let show = CustomMenuItem::new("show".to_string(), "Show");
@@ -215,7 +218,13 @@ fn main() -> anyhow::Result<()> {
         })
         .manage(network::SignalingSender(tx))
         .manage(InputState(Mutex::new(Enigo::new(&enigo::Settings::default()).unwrap())))
-        .manage(capture::CaptureState { running: Mutex::new(None) })
+        .manage(capture::CaptureState { 
+            running: Mutex::new(None),
+            latest_frame: std::sync::Arc::new(std::sync::RwLock::new(String::new()))
+        })
+        .manage(audio::AudioState {
+            running: Mutex::new(None)
+        })
         .setup(|app| {
             let app_handle = app.handle();
             // Load config inside setup to pass to listener
@@ -237,7 +246,10 @@ fn main() -> anyhow::Result<()> {
             simulate_input,
             log_message,
             capture::start_capture,
-            capture::stop_capture
+            capture::stop_capture,
+            capture::get_latest_frame,
+            audio::start_audio_capture,
+            audio::stop_audio_capture
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

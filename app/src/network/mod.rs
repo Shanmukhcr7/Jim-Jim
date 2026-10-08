@@ -25,9 +25,16 @@ pub async fn start_background_listener(
             Ok((ws_stream, _)) => {
                 info!("Background listener connected!");
                 let (mut write, mut read) = ws_stream.split();
+                let mut ping_interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
                 
                 loop {
                     tokio::select! {
+                        _ = ping_interval.tick() => {
+                            if let Err(e) = write.send(Message::Ping(vec![])).await {
+                                error!("Heartbeat failed, internet disconnected: {}", e);
+                                break;
+                            }
+                        }
                         msg_opt = read.next() => {
                             if let Some(msg) = msg_opt {
                                 match msg {
@@ -42,6 +49,9 @@ pub async fn start_background_listener(
                                                 let _ = app_handle.emit_all("webrtc_signaling", json_val);
                                             }
                                         }
+                                    }
+                                    Ok(Message::Pong(_)) => {
+                                        // Heartbeat acknowledged
                                     }
                                     Ok(_) => {},
                                     Err(e) => {
